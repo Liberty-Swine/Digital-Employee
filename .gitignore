@@ -1,0 +1,5 @@
+# .gitignore 文件内容
+chroma_db/
+__pycache__/
+*.pyc
+.env
