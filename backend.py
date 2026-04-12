@@ -5,8 +5,8 @@ import shutil
 import threading
 import random
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, List
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -28,6 +28,7 @@ from langchain_ollama import OllamaEmbeddings
 from document_loader import load_documents_from_folder, split_documents_by_type
 from langchain_community.vectorstores import Chroma
 import os
+from collections import Counter
 
 CHECKPOINT_DB = "./checkpoints.db"
 
@@ -118,6 +119,7 @@ class ConversationLog(BaseModel):
     thread_id: str
     role: str
     content: str
+    intent: Optional[str] = None  #新增意图字段
 
 # ==================== 核心业务端点 ====================
 @app.get("/")
@@ -127,51 +129,79 @@ async def root():
 @app.get("/order/{order_id}", response_model=OrderResponse)
 async def query_order(order_id: str):
     """根据订单号查询订单详情"""
-    order = orders_db.get(order_id.upper())
-    if not order:
-        return OrderResponse(
-            status="not_found",
-            message=f"未找到订单 {order_id}，请确认订单号是否正确。"
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT order_id, status, logistics, items, created_at FROM orders WHERE order_id = %s",
+            (order_id.upper(),)
         )
-    return OrderResponse(
-        status="success",
-        order_id=order_id.upper(),
-        order_status=order["status"],
-        logistics=order["logistics"],
-        items=order["items"],
-        created_at=order["created_at"]
-    )
+        order = cursor.fetchone()
+        conn.close()
+        
+        if not order:
+            return OrderResponse(
+                status="not_found",
+                message=f"未找到订单 {order_id}，请确认订单号是否正确。"
+            )
+        return OrderResponse(
+            status="success",
+            order_id=order["order_id"],
+            order_status=order["status"],
+            logistics=order["logistics"],
+            items=order["items"],
+            created_at=order["created_at"].isoformat() if order["created_at"] else None
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/ticket", response_model=TicketResponse)
 async def create_ticket(req: TicketRequest):
     """创建售后服务工单"""
     ticket_id = f"TKT-{datetime.now().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
-    ticket = {
-        "ticket_id": ticket_id,
-        "user_id": req.user_id,
-        "issue_type": req.issue_type,
-        "description": req.description,
-        "created_at": datetime.now().isoformat(),
-        "status": "待处理"
-    }
-    tickets_db.append(ticket)
-    print(f"📋 [工单创建] ID: {ticket_id}, 类型: {req.issue_type}, 用户: {req.user_id}")
-    
-    return TicketResponse(
-        status="success",
-        ticket_id=ticket_id,
-        message=f"您的{req.issue_type}工单已创建，客服将尽快处理。"
-    )
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO tickets (ticket_id, user_id, issue_type, description) VALUES (%s, %s, %s, %s)",
+            (ticket_id, req.user_id, req.issue_type, req.description)
+        )
+        conn.commit()
+        conn.close()
+        print(f"📋 [工单创建] ID: {ticket_id}, 类型: {req.issue_type}, 用户: {req.user_id}")
+        return TicketResponse(
+            status="success",
+            ticket_id=ticket_id,
+            message=f"您的{req.issue_type}工单已创建，客服将尽快处理。"
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/tickets")
 async def list_tickets():
     """列出所有工单（调试用）"""
-    return {"total": len(tickets_db), "tickets": tickets_db}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute("SELECT * FROM tickets ORDER BY created_at DESC")
+        tickets = cursor.fetchall()
+        conn.close()
+        return {"total": len(tickets), "tickets": tickets}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/orders")
 async def list_orders():
     """列出所有订单（调试用）"""
-    return {"total": len(orders_db), "orders": orders_db}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute("SELECT * FROM orders ORDER BY created_at DESC")
+        orders = cursor.fetchall()
+        conn.close()
+        return {"total": len(orders), "orders": orders}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 # ==================== 知识库管理端点 ====================
 def count_documents() -> int:
@@ -312,8 +342,8 @@ async def log_conversation(log: ConversationLog):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO conversation_history (thread_id, role, content) VALUES (%s, %s, %s)",
-            (log.thread_id, log.role, log.content)
+            "INSERT INTO conversation_history (thread_id, role, content, intent) VALUES (%s, %s, %s, %s)",
+            (log.thread_id, log.role, log.content, log.intent)
         )
         conn.commit()
         conn.close()
@@ -365,7 +395,97 @@ async def get_conversation_detail(thread_id: str):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+#数据看板接口
+@app.get("/admin/stats/overview")
+async def get_stats_overview(start_date: str, end_date: str):
+    """获取指定日期范围内的运营统计数据"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        
+        # 总消息数
+        cursor.execute("""
+            SELECT COUNT(*) AS total FROM conversation_history
+            WHERE DATE(created_at) BETWEEN %s AND %s
+        """, (start_date, end_date))
+        total_messages = cursor.fetchone()["total"]
+        
+        # 总对话数（按 thread_id 去重）
+        cursor.execute("""
+            SELECT COUNT(DISTINCT thread_id) AS total FROM conversation_history
+            WHERE DATE(created_at) BETWEEN %s AND %s
+        """, (start_date, end_date))
+        total_conversations = cursor.fetchone()["total"]
+        
+        # 独立用户数（从 thread_id 中提取用户名部分）
+        cursor.execute("""
+            SELECT DISTINCT thread_id FROM conversation_history
+            WHERE DATE(created_at) BETWEEN %s AND %s
+        """, (start_date, end_date))
+        threads = cursor.fetchall()
+        users = set()
+        for t in threads:
+            # thread_id 格式如 "张三_xxxx_session"，取第一部分
+            users.add(t["thread_id"].split("_")[0])
+        unique_users = len(users)
+        
+        # 平均助手回复长度
+        cursor.execute("""
+            SELECT AVG(CHAR_LENGTH(content)) AS avg_len FROM conversation_history
+            WHERE role = 'assistant' AND DATE(created_at) BETWEEN %s AND %s
+        """, (start_date, end_date))
+        avg_len = cursor.fetchone()["avg_len"] or 0
+        
+        # 近7天每日趋势
+        daily_trend = []
+        current = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        while current <= end:
+            next_day = current + timedelta(days=1)
+            cursor.execute("""
+                SELECT COUNT(*) AS cnt FROM conversation_history
+                WHERE created_at >= %s AND created_at < %s
+            """, (current.isoformat(), next_day.isoformat()))
+            cnt = cursor.fetchone()["cnt"]
+            daily_trend.append({"date": current.isoformat(), "count": cnt})
+            current = next_day
+        
+        # 热门问题 Top 5（用户消息）
+        cursor.execute("""
+            SELECT content, COUNT(*) AS cnt FROM conversation_history
+            WHERE role = 'user' AND DATE(created_at) BETWEEN %s AND %s
+            GROUP BY content
+            ORDER BY cnt DESC
+            LIMIT 5
+        """, (start_date, end_date))
+        top_questions = cursor.fetchall()
+        
+# 在统计接口中添加意图分布查询
+        cursor.execute("""
+            SELECT intent, COUNT(*) AS cnt FROM conversation_history
+            WHERE role = 'assistant' AND intent IS NOT NULL AND DATE(created_at) BETWEEN %s AND %s
+            GROUP BY intent
+        """, (start_date, end_date))
+        intent_rows = cursor.fetchall()
+        intent_distribution = {"knowledge": 0, "action": 0, "human": 0}
+        for row in intent_rows:
+            if row["intent"] in intent_distribution:
+                intent_distribution[row["intent"]] = row["cnt"]
 
+        conn.close()
+        
+        return {
+            "total_messages": total_messages,
+            "total_conversations": total_conversations,
+            "unique_users": unique_users,
+            "avg_response_length": round(avg_len, 1),
+            "daily_trend": daily_trend,
+            "intent_distribution": intent_distribution,  # 若后续记录意图可扩展
+            "top_questions": [{"content": q["content"], "count": q["cnt"]} for q in top_questions]
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    
 # ==================== 启动入口 ====================
 if __name__ == "__main__":
     import uvicorn

@@ -1,0 +1,58 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root123
+          MYSQL_DATABASE: digital_employee
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov httpx
+
+    - name: Wait for MySQL
+      run: sleep 20
+
+    - name: Initialize database
+      run: |
+        mysql -h 127.0.0.1 -u root -proot123 digital_employee < schema.sql
+      continue-on-error: true
+
+    - name: Run tests with coverage
+      env:
+        MYSQL_HOST: 127.0.0.1
+        MYSQL_PORT: 3306
+        MYSQL_USER: root
+        MYSQL_PASSWORD: root123
+        MYSQL_DATABASE: digital_employee
+      run: |
+        pytest --cov=. --cov-report=xml
+
+    - name: Upload coverage to Codecov (optional)
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml

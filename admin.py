@@ -2,7 +2,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="极客科技·管理后台", page_icon="🛠️", layout="wide")
 
@@ -29,7 +29,7 @@ st.caption(f"登录时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 # 侧边栏导航
 menu = st.sidebar.radio(
     "导航菜单",
-    ["📚 知识库管理", "📋 工单列表", "💬 对话记录", "📦 订单列表"]
+    ["📊 数据看板", "📚 知识库管理", "📋 工单列表", "💬 对话记录", "📦 订单列表"]  # 🆕 新增看板
 )
 
 # ==================== 知识库管理 ====================
@@ -152,3 +152,77 @@ elif menu == "📦 订单列表":
                 st.info("暂无订单")
     except Exception as e:
         st.error(f"获取订单失败：{e}")
+# ==================== 数据看板 ====================
+elif menu == "📊 数据看板":
+    st.header("📊 运营数据看板")
+    
+    # 获取日期范围选择
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("开始日期", value=datetime.now().date() - timedelta(days=7))
+    with col2:
+        end_date = st.date_input("结束日期", value=datetime.now().date())
+    
+    if start_date > end_date:
+        st.error("开始日期不能晚于结束日期")
+        st.stop()
+    
+    # 从后端获取统计数据（需要新增后端接口，见第三步）
+    try:
+        resp = requests.get(
+            f"{BACKEND_URL}/admin/stats/overview",
+            params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+            timeout=10
+        )
+        if resp.status_code != 200:
+            st.error("获取统计数据失败")
+            st.stop()
+        stats = resp.json()
+    except Exception as e:
+        st.error(f"连接后端失败：{e}")
+        st.stop()
+    
+    # 顶部指标卡片
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("📅 总对话量", stats.get("total_conversations", 0))
+    col2.metric("💬 总消息数", stats.get("total_messages", 0))
+    col3.metric("👥 独立用户数", stats.get("unique_users", 0))
+    col4.metric("📏 平均回复长度", f"{stats.get('avg_response_length', 0)} 字")
+    
+    st.divider()
+    
+    # 趋势图与分布图
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("📈 近7天对话趋势")
+        trend = stats.get("daily_trend", [])
+        if trend:
+            df_trend = pd.DataFrame(trend)
+            df_trend["date"] = pd.to_datetime(df_trend["date"])
+            df_trend = df_trend.set_index("date")
+            st.line_chart(df_trend["count"])
+        else:
+            st.info("暂无数据")
+    
+    with col2:
+        st.subheader("🥧 意图分布")
+        intent_dist = stats.get("intent_distribution", {})
+        if intent_dist:
+            df_intent = pd.DataFrame({
+                "意图": list(intent_dist.keys()),
+                "数量": list(intent_dist.values())
+            })
+            st.bar_chart(df_intent, x="意图", y="数量")
+        else:
+            st.info("暂无数据")
+    
+    st.divider()
+    
+    # 热门问题排行
+    st.subheader("🔥 热门用户提问 Top 5")
+    top_questions = stats.get("top_questions", [])
+    if top_questions:
+        for i, q in enumerate(top_questions, 1):
+            st.write(f"{i}. {q['content']} (出现 {q['count']} 次)")
+    else:
+        st.info("暂无数据")

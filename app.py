@@ -171,15 +171,14 @@ BACKEND_URL = "http://localhost:8000"
 
 st.set_page_config(page_title="极客科技·数字员工", page_icon="🤖")
 
-def log_conversation_async(thread_id, role, content):
+def log_conversation_async(thread_id, role, content, intent=None):
     """异步记录对话，不阻塞主线程"""
     def _log():
         try:
-            requests.post(f"{BACKEND_URL}/admin/conversation/log", json={
-                "thread_id": thread_id,
-                "role": role,
-                "content": content
-            }, timeout=2)
+            payload = {"thread_id": thread_id, "role": role, "content": content}
+            if intent:
+                payload["intent"] = intent
+            requests.post(f"{BACKEND_URL}/admin/conversation/log", json=payload, timeout=2)
         except Exception as e:
             print(f"⚠️ 记录对话失败: {e}")
     threading.Thread(target=_log, daemon=True).start()
@@ -284,10 +283,10 @@ if not st.session_state.interrupted:
             else:
                 message_placeholder.markdown("抱歉，我暂时无法处理您的问题。")
                 full_response = "抱歉，我暂时无法处理您的问题。"
-            
             # 记录助手消息到数据库
             st.session_state.messages.append({"role": "assistant", "content": full_response})
-            log_conversation_async(st.session_state.thread_id, "assistant", full_response)    
+            intent = result.get("intent", "unknown")  # 🆕 提取意图
+            log_conversation_async(st.session_state.thread_id, "assistant", full_response,intent)    
 
 # 人工客服回复区域（仅在中断状态下显示）
 else:
@@ -299,7 +298,7 @@ else:
     human_reply = st.chat_input("人工客服输入回复...")
     if human_reply:
         st.session_state.messages.append({"role": "assistant", "content": f"【人工客服】{human_reply}"})
-
+        log_conversation_async(st.session_state.thread_id, "assistant", f"【人工客服】{human_reply}", intent="human")
         config = {"configurable": {"thread_id": st.session_state.thread_id}}
         try:
             result = app.invoke(Command(resume=human_reply), config)
