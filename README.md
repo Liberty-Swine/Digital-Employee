@@ -5,7 +5,6 @@
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.2.0+-green)](https://github.com/langchain-ai/langgraph)
 [![Ollama](https://img.shields.io/badge/Ollama-Local-ff7000)](https://ollama.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28+-red)](https://streamlit.io/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 📖 项目介绍
 
