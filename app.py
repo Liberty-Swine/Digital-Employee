@@ -55,14 +55,153 @@
 #     st.session_state.messages.append({"role": "assistant", "content": answer})
 
 
-# 升级版本
+# 升级版本 添加人工客服版本
 # app.py
+# import streamlit as st
+# from langchain_core.messages import HumanMessage, AIMessage
+# from langgraph.types import Command
+# from langgraph.errors import GraphInterrupt
+# from workflow import build_workflow
+# import uuid
+
+# st.set_page_config(page_title="极客科技·数字员工", page_icon="🤖")
+# st.title("🤖 极客科技·智能客服")
+
+# @st.cache_resource
+# def load_app():
+#     return build_workflow()
+
+# app = load_app()
+
+# # 初始化会话状态
+# if "thread_id" not in st.session_state:
+#     st.session_state.thread_id = str(uuid.uuid4())
+#     st.session_state.messages = [
+#         {"role": "assistant", "content": "您好！我是极客科技的智能客服。您可以向我咨询政策、查询订单或反馈问题。"}
+#     ]
+#     st.session_state.interrupted = False
+#     st.session_state.interrupt_data = None
+
+# # 显示历史消息
+# for msg in st.session_state.messages:
+#     with st.chat_message(msg["role"]):
+#         st.markdown(msg["content"])
+
+# # 正常用户输入（仅在非中断状态下显示）
+# if not st.session_state.interrupted:
+#     if prompt := st.chat_input("请输入您的问题..."):
+#         st.session_state.messages.append({"role": "user", "content": prompt})
+#         with st.chat_message("user"):
+#             st.markdown(prompt)
+
+#         with st.chat_message("assistant"):
+#             with st.spinner("思考中..."):
+#                 input_state = {"messages": [HumanMessage(content=prompt)]}
+#                 config = {"configurable": {"thread_id": st.session_state.thread_id}}
+
+#                 try:
+#                     result = app.invoke(input_state, config)
+
+#                     # 兼容某些版本可能返回字典包含 __interrupt__ 的情况
+#                     if isinstance(result, dict) and "__interrupt__" in result:
+#                         interrupt_info = result["__interrupt__"][0]
+#                         # 若是 Interrupt 对象则取 value，否则直接使用
+#                         interrupt_data = interrupt_info.value if hasattr(interrupt_info, 'value') else interrupt_info
+#                         st.session_state.interrupted = True
+#                         st.session_state.interrupt_data = interrupt_data
+#                         st.rerun()  # 立即刷新
+
+#                     # 正常返回
+#                     answer = result.get("final_response", "抱歉，我暂时无法处理您的问题。")
+#                     st.markdown(answer)
+#                     st.session_state.messages.append({"role": "assistant", "content": answer})
+
+#                 except GraphInterrupt as e:
+#                     print("🔥 [app] 成功捕获 GraphInterrupt 异常")
+#                     interrupt_obj = e.interrupts[0]
+#                     # 从 Interrupt 对象中提取实际数据
+#                     interrupt_data = interrupt_obj.value if hasattr(interrupt_obj, 'value') else interrupt_obj
+#                     st.session_state.interrupted = True
+#                     st.session_state.interrupt_data = interrupt_data
+#                     st.rerun()  # 立即刷新
+
+#                 except Exception as e:
+#                     print(f"❌ 未预期的错误：{type(e).__name__} - {e}")
+#                     st.error(f"系统遇到了一点问题，请稍后重试。")
+
+# # 人工客服回复区域（仅在中断状态下显示）
+# else:
+#     st.warning("👤 当前为人工客服模式，请输入您的回复...")
+#     if st.session_state.interrupt_data:
+#         user_q = st.session_state.interrupt_data.get('user_question', '')
+#         st.info(f"**用户问题：** {user_q}")
+
+#     human_reply = st.chat_input("人工客服输入回复...")
+#     if human_reply:
+#         st.session_state.messages.append({"role": "assistant", "content": f"【人工客服】{human_reply}"})
+
+#         config = {"configurable": {"thread_id": st.session_state.thread_id}}
+#         try:
+#             # 恢复执行，传入人工回复
+#             result = app.invoke(Command(resume=human_reply), config)
+#         except Exception as e:
+#             st.error(f"恢复执行失败：{e}")
+
+#         st.session_state.interrupted = False
+#         st.session_state.interrupt_data = None
+#         st.rerun()
+
+
+# app.py 添加用户登录模块
 import streamlit as st
 from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.types import Command
+from langgraph.errors import GraphInterrupt
 from workflow import build_workflow
+import uuid
+import requests
+import threading
+import time
+import os
+
+#禁用追踪器,有兼容性问题
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
+BACKEND_URL = "http://localhost:8000"
 
 st.set_page_config(page_title="极客科技·数字员工", page_icon="🤖")
-st.title("🤖 极客科技·智能客服 (LangGraph版)")
+
+def log_conversation_async(thread_id, role, content):
+    """异步记录对话，不阻塞主线程"""
+    def _log():
+        try:
+            requests.post(f"{BACKEND_URL}/admin/conversation/log", json={
+                "thread_id": thread_id,
+                "role": role,
+                "content": content
+            }, timeout=2)
+        except Exception as e:
+            print(f"⚠️ 记录对话失败: {e}")
+    threading.Thread(target=_log, daemon=True).start()
+
+# ==================== 用户登录 ====================
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if st.session_state.user is None:
+    st.title("🔐 登录 · 极客科技智能客服")
+    username = st.text_input("请输入您的用户名（任意非空字符）", key="login_input")
+    if st.button("进入系统") and username.strip():
+        st.session_state.user = username.strip()
+        # 为每个用户生成唯一的 thread_id 前缀
+        st.session_state.user_prefix = f"{st.session_state.user}_{str(uuid.uuid4())[:8]}"
+        st.rerun()
+    st.stop()
+
+
+# ==================== 主应用（登录后） ====================
+st.title(f"🤖 极客科技·智能客服")
+st.caption(f"👤 当前用户：{st.session_state.user}")
 
 @st.cache_resource
 def load_app():
@@ -70,37 +209,103 @@ def load_app():
 
 app = load_app()
 
-# 初始化会话
+# 初始化会话状态（每个用户独立）
 if "thread_id" not in st.session_state:
-    st.session_state.thread_id = "user_session_1"
+    # thread_id 结合用户名，确保不同用户状态隔离
+    st.session_state.thread_id = f"{st.session_state.user_prefix}_session"
     st.session_state.messages = [
-        {"role": "assistant", "content": "您好！我是极客科技的智能客服。您可以向我咨询政策、查询订单或反馈问题。"}
+        {"role": "assistant", "content": f"您好 {st.session_state.user}！我是极客科技的智能客服。您可以向我咨询政策、查询订单或反馈问题。"}
     ]
+    st.session_state.interrupted = False
+    st.session_state.interrupt_data = None
 
 # 显示历史消息
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 接收用户输入
-if prompt := st.chat_input("请输入您的问题..."):
-    # 显示用户消息
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    
-    # 调用 LangGraph 工作流
-    with st.chat_message("assistant"):
-        with st.spinner("思考中..."):
-            # 构建输入状态
-            input_state = {
-                "messages": [HumanMessage(content=prompt)]
-            }
-            # 执行图，传入 thread_id 以支持记忆
-            config = {"configurable": {"thread_id": st.session_state.thread_id}}
-            result = app.invoke(input_state, config)
+# 正常用户输入（仅在非中断状态下显示）
+if not st.session_state.interrupted:
+    if prompt := st.chat_input("请输入您的问题..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        log_conversation_async(st.session_state.thread_id, "user", prompt)  # 保持日志记录
+        
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()  # 用于流式更新
+            full_response = ""
             
-            answer = result.get("final_response", "抱歉，我暂时无法处理您的问题。")
-            st.markdown(answer)
-    
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+            with st.spinner("思考中..."):
+                input_state = {"messages": [HumanMessage(content=prompt)]}
+                config = {"configurable": {"thread_id": st.session_state.thread_id}}
+
+                try:
+                    # 一次性获取完整回答（非流式）
+                    result = app.invoke(input_state, config)
+                    
+                    # 检查中断（与之前逻辑完全一致）
+                    if isinstance(result, dict) and "__interrupt__" in result:
+                        interrupt_info = result["__interrupt__"][0]
+                        interrupt_data = interrupt_info.value if hasattr(interrupt_info, 'value') else interrupt_info
+                        st.session_state.interrupted = True
+                        st.session_state.interrupt_data = interrupt_data
+                        st.rerun()
+                    full_response = result.get("final_response", "抱歉，我暂时无法处理您的问题。")
+                    
+                except GraphInterrupt as e:
+                    interrupt_obj = e.interrupts[0]
+                    interrupt_data = interrupt_obj.value if hasattr(interrupt_obj, 'value') else interrupt_obj
+                    st.session_state.interrupted = True
+                    st.session_state.interrupt_data = interrupt_data
+                    st.rerun()
+                    
+                except Exception as e:
+                    full_response = f"系统遇到了一点问题，请稍后重试。"
+                    print(f"❌ 未预期的错误：{type(e).__name__} - {e}")
+            
+            # 🆕 流式显示完整回答（模拟打字机）
+            if full_response:
+                displayed = ""
+                # 控制打字速度（字符/秒），可调整 计算动态延迟：短文本稍慢，长文本稍快
+                base_delay = 0.03
+                if len(full_response) > 200:
+                    delay_per_char = 0.015
+                elif len(full_response) > 100:
+                    delay_per_char = 0.02
+                else:
+                    delay_per_char = 0.03
+                for char in full_response:
+                    displayed += char
+                    message_placeholder.markdown(displayed + "▌")
+                    time.sleep(delay_per_char)
+                message_placeholder.markdown(full_response)  # 最终去掉光标
+            else:
+                message_placeholder.markdown("抱歉，我暂时无法处理您的问题。")
+                full_response = "抱歉，我暂时无法处理您的问题。"
+            
+            # 记录助手消息到数据库
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+            log_conversation_async(st.session_state.thread_id, "assistant", full_response)    
+
+# 人工客服回复区域（仅在中断状态下显示）
+else:
+    st.warning("👤 当前为人工客服模式，请输入您的回复...")
+    if st.session_state.interrupt_data:
+        user_q = st.session_state.interrupt_data.get('user_question', '')
+        st.info(f"**用户问题：** {user_q}")
+
+    human_reply = st.chat_input("人工客服输入回复...")
+    if human_reply:
+        st.session_state.messages.append({"role": "assistant", "content": f"【人工客服】{human_reply}"})
+
+        config = {"configurable": {"thread_id": st.session_state.thread_id}}
+        try:
+            result = app.invoke(Command(resume=human_reply), config)
+        except Exception as e:
+            st.error(f"恢复执行失败：{e}")
+
+        st.session_state.interrupted = False
+        st.session_state.interrupt_data = None
+        st.rerun()

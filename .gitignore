@@ -1,5 +1,34 @@
-# .gitignore 文件内容
+# 向量库数据（体积大，可本地重建）
 chroma_db/
+
+# 数据库文件（SQLite 检查点）
+*.db
+checkpoints.db
+checkpoints.*
+
+# Python 缓存
 __pycache__/
 *.pyc
+*.pyo
+
+# 虚拟环境
+venv/
+env/
 .env
+
+# 环境变量文件（含密码）
+.env
+
+# 上传的文档（可选，若文档含敏感信息）
+# docs/*.pdf
+# docs/*.docx
+
+# IDE 配置
+.vscode/
+.idea/
+
+# Streamlit 缓存
+.streamlit/
+
+# 日志文件
+*.log

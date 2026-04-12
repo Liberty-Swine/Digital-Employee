@@ -6,49 +6,124 @@ from state import CustomerServiceState
 import json
 import random
 from datetime import datetime
+import requests
+
+# API 基础地址
+API_BASE_URL = "http://localhost:8000"
 
 # ==================== 工具定义 ====================
 @tool
 def create_ticket(user_id: str, issue_type: str, description: str) -> str:
-    """当用户明确要求创建工单、反馈问题、投诉或记录售后请求时调用。"""
-    ticket_id = f"TKT-{datetime.now().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
-    print(f"📋 [模拟] 工单已创建 -> ID: {ticket_id}, 类型: {issue_type}, 用户: {user_id}")
-    return json.dumps({
-        "status": "success",
-        "ticket_id": ticket_id,
-        "message": f"您的{issue_type}工单已创建，客服将尽快处理。"
-    }, ensure_ascii=False)
+    """
+    当用户要求创建工单、投诉、反馈问题或退货时调用。
+    
+    **参数获取优先级：**
+    1. 从【对话历史】中提取已有的订单号作为 user_id 或补充信息。
+    2. 如果历史中没有，再向用户询问。
+    
+    参数说明：
+    - user_id: 用户ID或订单号（可从历史中提取）
+    - issue_type: 问题类型，可选：退货、换货、维修、投诉、咨询
+    - description: 问题的详细描述
+    """
+    try:
+        response=requests.post(
+            f"{API_BASE_URL}/ticket",
+            json={
+                "user_id": user_id,
+                "issue_type": issue_type,
+                "description": description
+            },
+            timeout=5
+        )
+        # 自动检查请求是否失败 4xx/5xx → 抛异常；2xx → 正常运行
+        response.raise_for_status()
+        raw_data = response.json()
+        if isinstance(raw_data, str):
+            data = json.loads(raw_data)
+        else:
+            data = raw_data
+            
+        if not isinstance(data, dict):
+            return json.dumps({
+                "status": "error",
+                "message": f"API 返回格式异常：{type(data)}"
+            }, ensure_ascii=False)
+        print(f"📋 [真实API] 工单创建 -> ID: {data.get('ticket_id')}, 类型: {issue_type}")
+        return json.dumps(data, ensure_ascii=False)
+    #连接错误
+    except requests.exceptions.ConnectionError:
+        return json.dumps({
+            "status": "error",
+            "message": "无法连接到工单服务，请稍后重试。"
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"创建工单时发生错误：{str(e)}"
+        }, ensure_ascii=False)
 
 @tool
 def query_order(order_id: str) -> str:
-    """根据订单号查询订单的当前状态和物流信息。"""
-    mock_orders = {
-        "ORD-20260411-1234": {
-            "status": "已发货",
-            "logistics": "中通快递 运单号：ZT123456789，预计4月13日送达",
-            "items": "极客智能音箱 x1"
-        },
-        "ORD-20260410-5678": {
-            "status": "待发货",
-            "logistics": "仓库处理中，预计今日发货",
-            "items": "极客无线耳机 x2"
-        }
-    }
-    order = mock_orders.get(order_id)
-    if not order:
-        return json.dumps({"status": "not_found", "message": f"未找到订单 {order_id}"}, ensure_ascii=False)
-    print(f"📦 [模拟] 查询订单 -> {order_id}: {order['status']}")
-    return json.dumps({"status": "success", "order_id": order_id, **order}, ensure_ascii=False)
+    """根据订单号查询订单的当前状态和物流信息。如果订单号未知或为空，请不要调用此工具，而是询问用户。"""
+    if not order_id or order_id.strip() == "":
+        return json.dumps({
+            "status": "error",
+            "message": "缺少订单号，无法查询。请提供有效的订单号。"
+        }, ensure_ascii=False)
+    try:
+        response=requests.get(
+            f"{API_BASE_URL}/order/{order_id}",
+            timeout=5
+        )
+        # 自动检查请求是否失败 4xx/5xx → 抛异常；2xx → 正常运行
+        response.raise_for_status()
+        #强制检查 response.json() 的类型
+        raw_data = response.json()
+        print(f"🔍 [DEBUG] raw_data type: {type(raw_data)}, content: {raw_data}")
+        
+        # 如果返回的是字符串，尝试解析为 JSON
+        if isinstance(raw_data, str):
+            data = json.loads(raw_data)
+        else:
+            data = raw_data
+        #校验格式
+        if not isinstance(data, dict):
+            return json.dumps({
+                "status": "error",
+                "message": f"API 返回格式异常：{type(data)}"
+            }, ensure_ascii=False)
+        
+        # 没找到订单
+        if data.get("status") == "not_found":
+            return json.dumps(data, ensure_ascii=False)
+        print(f"📦 [真实API] 查询订单 -> {order_id}: {data.get('order_status')}")
+        return json.dumps(data, ensure_ascii=False)
+    #连接错误
+    except requests.exceptions.ConnectionError:
+        return json.dumps({
+            "status": "error",
+            "message": "无法连接到订单服务，请稍后重试。"
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"查询订单时发生错误：{str(e)}"
+        }, ensure_ascii=False)
 
 tools = [create_ticket, query_order]
 
 # ==================== 上下文提取辅助函数 ====================
 def format_history(messages):
-    """将消息列表格式化为文本历史"""
+    """将消息列表格式化为文本历史，并高亮订单号"""
     history = ""
     for msg in messages:
         role = "用户" if msg.type == "human" else "助手"
-        history += f"{role}：{msg.content}\n"
+        content = msg.content
+        # 简单高亮：如果内容中包含订单号格式，添加提示
+        if "ORD-" in content:
+            content += " 【注意：此处包含订单号】"
+        history += f"{role}：{content}\n"
     return history
 
 def extract_context(messages, max_messages=12):
@@ -75,17 +150,22 @@ def create_action_node(llm: ChatOllama):
 
     # ✅ 修复：提示词顶格书写，避免缩进污染
     system_prompt = """你是一个专业的售后执行专家。你可以使用以下工具：
-- create_ticket: 当用户要求创建工单、投诉、反馈问题时使用。
 - query_order: 当用户想查询订单状态、物流信息时使用。
+- create_ticket: 当用户要求创建工单、投诉、反馈问题或退货时使用。
 
-**重要规则：**
-1. 仔细阅读【对话历史】，理解用户的指代关系（如“这个订单”、“它”等）。
-2. 如果历史中已提及订单号、用户ID等关键信息，请直接使用，无需重复询问。
-3. 工具调用成功后，用友好的语言将结果告知用户。
-4. 不要编造任何未通过工具确认的信息。
+**🔥 最重要的规则（请务必遵守）：**
+1. **优先从【对话历史】中提取订单号、用户ID等关键信息**，不要重复询问用户已经提供过的信息！
+2. 如果历史中已经明确提到了订单号（如 ORD-20260411-1234），在执行退货、查询等操作时，直接使用该订单号，无需再次索要。
+3. 只有在历史中**确实找不到**所需信息时，才向用户询问。
+
+**工具调用指南：**
+- 当用户说“退货”、“我要退货”、“把这个订单退了”等，如果历史中有订单号，直接调用 `create_ticket`，issue_type 填“退货”，description 填用户描述。
+- 如果用户既没提供订单号，历史中也没有，则友好地询问订单号。
 
 【对话历史】
-{history}"""
+{history}
+
+**请仔细阅读历史，提取其中的订单号、用户ID等信息。**"""
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),

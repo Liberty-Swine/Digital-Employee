@@ -1,0 +1,28 @@
+# build_index.py
+from langchain_ollama import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+from document_loader import load_documents_from_folder, split_documents_by_type
+import os
+
+def rebuild_index():
+    print("📂 正在扫描 docs 文件夹...")
+    docs = load_documents_from_folder("./docs")
+    if not docs:
+        print("⚠️ 没有文档，跳过索引构建")
+        return
+
+    print(f"📚 共加载 {len(docs)} 个文档片段")
+    chunks = split_documents_by_type(docs)
+    print(f"🧩 切分为 {len(chunks)} 个文本块")
+
+    embeddings = OllamaEmbeddings(model="lrs33/bce-embedding-base_v1:latest", base_url="http://localhost:11434")
+
+    Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory="./chroma_db"
+    )
+    print("✅ 向量索引重建完成！")
+
+if __name__ == "__main__":
+    rebuild_index()

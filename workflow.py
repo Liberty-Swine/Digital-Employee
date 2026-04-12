@@ -1,6 +1,7 @@
 # workflow.py
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver #导入 SQLite 检查点
+import sqlite3         # 用于创建数据库连接
 from langchain_ollama import ChatOllama
 from langchain_core.messages import AIMessage
 
@@ -9,6 +10,8 @@ from supervisor import create_supervisor_node
 from agents.knowledge import init_knowledge_node, knowledge_node
 from agents.action import create_action_node
 from agents.human import human_node
+import pymysql
+from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 
 def build_workflow():
     """构建并编译 LangGraph 工作流"""
@@ -55,8 +58,27 @@ def build_workflow():
     workflow.add_edge("action", END)
     workflow.add_edge("human", END)
 
-     # 编译（带记忆）
-    memory = MemorySaver()
+    # 创建 MySQL 连接（必须设置 autocommit=True）
+    conn = pymysql.connect(
+        host="localhost",
+        port=3306,
+        user="root",
+        password="123456",
+        database="digital_employee",
+        charset="utf8mb4",
+        autocommit=True,          # 必须设置为 True
+    )
+    # 创建检查点保存器
+    memory = PyMySQLSaver(conn)
+    # 首次使用必须调用 setup() 创建表
+    memory.setup()
+
     app = workflow.compile(checkpointer=memory)
+
+    # 调试：打印每次更新后的消息数量
+    def debug_print(state):
+        print(f"🔍 当前 messages 数量: {len(state.get('messages', []))}")
+        return state
+    app = app.with_listeners(on_end=debug_print)
 
     return app
