@@ -29,6 +29,7 @@ from document_loader import load_documents_from_folder, split_documents_by_type
 from langchain_community.vectorstores import Chroma
 import os
 from collections import Counter
+import bcrypt
 
 CHECKPOINT_DB = "./checkpoints.db"
 
@@ -121,10 +122,29 @@ class ConversationLog(BaseModel):
     content: str
     intent: Optional[str] = None  #新增意图字段
 
+# ==================== 用户相关模型 ====================
+class UserRegister(BaseModel):
+    username: str
+    password: str
+    display_name: Optional[str] = None
+    role_code: str = "customer"  # 默认普通用户
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class UserInfo(BaseModel):
+    id: int
+    username: str
+    display_name: Optional[str]
+    roles: List[str]
+    merchant_id: Optional[int] = None
+
 # ==================== 核心业务端点 ====================
 @app.get("/")
 async def root():
     return {"message": "极客科技订单工单系统已启动", "version": "1.0.0"}
+
 
 @app.get("/order/{order_id}", response_model=OrderResponse)
 async def query_order(order_id: str):
@@ -394,8 +414,7 @@ async def get_conversation_detail(thread_id: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-#数据看板接口
+# ==================== 数据看板接口端点 ====================
 @app.get("/admin/stats/overview")
 async def get_stats_overview(start_date: str, end_date: str):
     """获取指定日期范围内的运营统计数据"""
@@ -483,6 +502,119 @@ async def get_stats_overview(start_date: str, end_date: str):
             "intent_distribution": intent_distribution,  # 若后续记录意图可扩展
             "top_questions": [{"content": q["content"], "count": q["cnt"]} for q in top_questions]
         }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+
+# ==================== 辅助函数 ====================
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    """验证密码，带异常处理"""
+    if not password or not hashed:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+    except Exception as e:
+        print(f"密码验证异常: {e}")
+        return False
+def get_user_roles(user_id: int) -> List[str]:
+    conn = get_db_connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+    cursor.execute("SELECT role_code FROM user_roles WHERE user_id = %s", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    # ✅ 使用字典键名访问
+    return [row["role_code"] for row in rows]
+
+# ==================== 用户相关 ====================
+@app.post("/auth/register")
+async def register(user: UserRegister):
+    """用户注册"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # 检查用户名是否存在
+        cursor.execute("SELECT id FROM users WHERE username = %s", (user.username,))
+        if cursor.fetchone():
+            return JSONResponse(status_code=400, content={"error": "用户名已存在"})
+        
+        # 插入用户
+        hashed = hash_password(user.password)
+        cursor.execute(
+            "INSERT INTO users (username, password_hash, display_name) VALUES (%s, %s, %s)",
+            (user.username, hashed, user.display_name or user.username)
+        )
+        user_id = cursor.lastrowid
+        
+        # 分配角色
+        cursor.execute(
+            "INSERT INTO user_roles (user_id, role_code) VALUES (%s, %s)",
+            (user_id, user.role_code)
+        )
+        
+        conn.commit()
+        conn.close()
+        return {"status": "success", "message": "注册成功", "user_id": user_id}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/auth/login")
+async def login(login_data: UserLogin):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT id, username, password_hash, display_name, merchant_id FROM users WHERE username = %s",
+            (login_data.username,)
+        )
+        user = cursor.fetchone()
+        conn.close()
+
+        if not user:
+            return JSONResponse(status_code=401, content={"error": "用户名或密码错误"})
+
+        # 验证密码
+        if not verify_password(login_data.password, user["password_hash"]):
+            return JSONResponse(status_code=401, content={"error": "用户名或密码错误"})
+
+        # 获取角色列表
+        roles = get_user_roles(user["id"])
+
+        return {
+            "status": "success",
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "display_name": user["display_name"],
+                "roles": roles,
+                "merchant_id": user.get("merchant_id")
+            }
+        }
+    except Exception as e:
+        print(f"登录异常: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/users/me")
+async def get_current_user(user_id: int):
+    """获取用户信息（通过ID）"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT id, username, display_name, merchant_id FROM users WHERE id = %s",
+            (user_id,)
+        )
+        user = cursor.fetchone()
+        conn.close()
+        if not user:
+            return JSONResponse(status_code=404, content={"error": "用户不存在"})
+        user["roles"] = get_user_roles(user_id)
+        return user
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
     

@@ -12,3 +12,8 @@ class CustomerServiceState(TypedDict):
     knowledge_context: Optional[str]  # RAG检索出的上下文
     action_result: Optional[str]      # 工具执行的结果
     final_response: Optional[str]     # 最终回复
+
+    # 🆕 用户上下文
+    user_id: Optional[int]
+    user_roles: Optional[List[str]]
+    merchant_id: Optional[int]

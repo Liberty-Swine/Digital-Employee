@@ -10,6 +10,7 @@ from supervisor import create_supervisor_node
 from agents.knowledge import init_knowledge_node, knowledge_node
 from agents.action import create_action_node
 from agents.human import human_node
+from agents.sql_agent import create_sql_node   # 🆕 导入 SQL 节点
 import pymysql
 from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 
@@ -24,9 +25,10 @@ def build_workflow():
     )
 
     # 2. 初始化需要 LLM 的节点
-    init_knowledge_node(llm, persist_dir="./chroma_db")
+    init_knowledge_node(llm, persist_dir="./chroma_db") # 创建 知识库 节点
     supervisor_node = create_supervisor_node(llm)
-    action_node = create_action_node(llm)
+    action_node = create_action_node(llm) # 创建 售后 节点
+    sql_node = create_sql_node(llm) # 创建 SQL 节点
 
     # 3. 构建图
     workflow = StateGraph(CustomerServiceState)
@@ -36,6 +38,7 @@ def build_workflow():
     workflow.add_node("knowledge", knowledge_node)
     workflow.add_node("action", action_node)
     workflow.add_node("human", human_node)
+    workflow.add_node("data", sql_node)
 
     # 设置入口
     workflow.set_entry_point("supervisor")
@@ -47,6 +50,8 @@ def build_workflow():
             return "knowledge"
         elif intent == "action":
             return "action"
+        elif intent == "data":
+            return "data"
         else:
             return "human"
     
@@ -57,6 +62,7 @@ def build_workflow():
     workflow.add_edge("knowledge", END)
     workflow.add_edge("action", END)
     workflow.add_edge("human", END)
+    workflow.add_edge("data", END)
 
     # 创建 MySQL 连接（必须设置 autocommit=True）
     conn = pymysql.connect(

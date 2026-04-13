@@ -8,29 +8,20 @@ from state import CustomerServiceState
 # supervisor.py（关键修改部分）
 
 INTENT_PROMPT = ChatPromptTemplate.from_template("""
-你是一个专业的客服意图分类专家。请仔细分析**对话历史**和**用户最新问题**，将其归类为以下三种意图之一。
+你是一个专业的客服意图分类专家。请仔细分析**对话历史**和**用户最新问题**，将其归类为以下四种意图之一。
 
-**意图定义与核心区别：**
-- **knowledge**: 用户想了解**静态知识、公司政策、产品说明、规章制度**。这类信息通常记录在文档中，**不需要调用业务系统查询实时数据**。
-  ✅ 正确示例："退货政策是什么？"、"保修期多久？"、"怎么使用产品？"
-  
-- **action**: 用户要求执行一个**具体的业务操作**，包括**创建、修改、查询动态数据**（如订单状态、物流信息、工单记录、会员积分）。**任何涉及特定订单号、手机号、工单号的查询都属于 action**。
-  ✅ 正确示例："我要退货"、"帮我查一下订单12345"、"我的订单发货了吗？"、"修改收货地址"、"查询物流"、"查积分"
-  ❌ 易错辨析：即使用户使用了“查询”一词，只要查询的对象是**动态业务数据**（如某笔订单），就属于 **action**，因为它需要调用业务系统。
+**意图定义与硬边界：**
+- **knowledge**: 询问**静态规则/文档**（如政策、说明、制度）。不需要查询动态业务数据。
+- **action**: 针对**单个具体对象**的**精确操作**（查询/修改/创建）。对象必须可唯一标识（如订单号、工单号、手机号）。
+  ✅ 正确示例："我要退货"、"订单 ORD-123 到哪了？"、"修改收货地址"
+- **human**: 转人工、投诉、情绪宣泄。
+- **data**: 针对**数据集合**的**聚合统计**（计数、求和、平均、分组、排序）。问题中必含**聚合关键词**（多少、几条、统计、数量、排名、总计）。
+  ✅ 正确示例："过去一周有多少订单？"、"售后的工单有几条？"、"销量最高的商品是哪个？"
 
-- **human**: 用户情绪激动、明确要求人工客服、或问题超出能力范围。
-  ✅ 正确示例："我要投诉"、"转人工"、"你们太差了"
-
-**易混淆案例强制规则：**
-| 用户问题 | 正确答案 | 理由 |
-| :--- | :--- | :--- |
-| "查询订单 ORD-1234" | **action** | 查询特定订单的动态状态 |
-| "查询退货政策" | **knowledge** | 查询静态的公司政策 |
-| "我的订单到哪了？" | **action** | 查询物流动态信息 |
-| "订单一般几天到？" | **knowledge** | 询问一般规则，不涉及具体订单 |
-
-**重要上下文规则：**
-- 如果对话历史中助手刚询问了订单号，用户回复了一串数字或订单号，**意图应与上一轮保持一致（通常为 action）**。
+**🔥 冲突裁决铁律（必须遵守）：**
+1. 若问题中**同时包含具体标识符（如订单号、工单号、手机号）** → **action**。
+2. 若问题中**包含聚合关键词（多少、几条、统计、数量、总计、排名）且无具体标识符** → **data**。
+3. 若问题为“查询订单”且无任何限定词，默认按 **action** 处理（要求提供订单号）。
 
 【对话历史】
 {history}
@@ -38,12 +29,12 @@ INTENT_PROMPT = ChatPromptTemplate.from_template("""
 【用户最新问题】
 {user_input}
 
-请只输出一个单词：knowledge, action, 或 human。
+请只输出一个单词：knowledge, action, human, 或 data。
 意图：
 """)
 
-def create_supervisor_node(llm:ChatOllama):
-    """创建主管节点（带上下文感知）"""
+def create_supervisor_node(llm: ChatOllama):
+    """创建主管节点（带上下文感知 + 规则兜底）"""
     chain = INTENT_PROMPT | llm
 
     def supervisor_node(state: CustomerServiceState):
@@ -54,18 +45,33 @@ def create_supervisor_node(llm:ChatOllama):
         for msg in messages[-6:]:  # 取最近6条消息（约3轮对话）
             role = "用户" if msg.type == "human" else "助手"
             history += f"{role}：{msg.content}\n"
-        #用户输入
+        
         user_input = messages[-1].content
+        
+        # ✅ 规则兜底 1：明确要求转人工
+        human_keywords = ["转人工", "人工客服", "投诉你们", "找人工"]
+        if any(kw in user_input for kw in human_keywords):
+            print(f"🧠 [主管] 规则触发：转人工关键词 -> human")
+            return {"intent": "human"}
+        
+        # ✅ 规则兜底 2：聚合关键词 + 无具体标识符 → data
+        agg_keywords = ["多少", "几条", "几个", "统计", "数量", "总计", "排名", "销量最高"]
+        if any(kw in user_input for kw in agg_keywords) and not any(c.isdigit() for c in user_input):
+            print(f"🧠 [主管] 规则触发：聚合关键词 -> data")
+            return {"intent": "data"}
+        
+        # 正常 LLM 意图识别
         response = chain.invoke({
             "history": history if history else "无历史对话",
             "user_input": user_input
         })
-
+        
         intent = response.content.strip().lower()
-        if intent not in ["knowledge", "action", "human"]:
+        valid_intents = ["knowledge", "action", "human", "data"]
+        if intent not in valid_intents:
             intent = "human"
-
+        
         print(f"🧠 [主管] 意图识别: '{user_input}' -> {intent}")
         return {"intent": intent}
-
+    
     return supervisor_node
